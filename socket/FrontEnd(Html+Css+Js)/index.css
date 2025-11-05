@@ -611,3 +611,17 @@ select {
   background-color: #ffe99d;
   color: #000;
 }
+.btn-container.cpu-sync {
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 8px;
+}
+
+.btn-container.cpu-sync span {
+    margin-right: 4px;
+}
+
+.cpu-hint {
+    font-size: 12px;
+    color: #8c8c8c;
+}

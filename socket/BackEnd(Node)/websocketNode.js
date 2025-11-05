@@ -1,5 +1,6 @@
 const WebSocket = require('ws');
 const { v4: uuidv4 } = require('uuid');
+const os = require('os');
 
 // 储存已连接的用户及其标识
 const clients = new Map();
@@ -13,6 +14,9 @@ const punishmentTime = 1; // 默认一秒发送1次
 
 // 存储客户端和发送计时器关系
 const clientTimers = new Map();
+
+// 存储CPU同步控制器
+const cpuControllers = new Map();
 
 // 定义心跳消息
 const heartbeatMsg = {
@@ -177,6 +181,26 @@ wss.on('connection', function connection(ws) {
                         ws.send(JSON.stringify(sendData));
                     }
                     break;
+                case "cpuAuto":
+                    if (relations.get(clientId) !== targetId) {
+                        const data = { type: "cpuAuto", clientId, targetId, message: "402" }
+                        ws.send(JSON.stringify(data))
+                        return;
+                    }
+
+                    const action = data.action && data.action.toLowerCase() === 'stop' ? 'stop' : 'start';
+                    const controllerKey = buildCpuKey(clientId, targetId);
+
+                    if (action === 'stop') {
+                        stopCpuController(controllerKey, false);
+                        ws.send(JSON.stringify({ type: "cpuAuto", clientId, targetId, message: "stopped" }));
+                        break;
+                    }
+
+                    const options = normaliseCpuOptions(data);
+                    startCpuController(controllerKey, { clientId, targetId, options });
+                    ws.send(JSON.stringify({ type: "cpuAuto", clientId, targetId, message: "started", options }));
+                    break;
                 default:
                     // 未定义的普通消息
                     if (relations.get(clientId) !== targetId) {
@@ -316,3 +340,186 @@ function delaySendMsg(clientId, client, target, sendData, totalSends, timeSpace,
 }
 
 
+function clamp(value, min, max) {
+    if (!Number.isFinite(value)) {
+        return min;
+    }
+    return Math.min(Math.max(value, min), max);
+}
+
+function captureCpuSnapshot() {
+    const cpus = os.cpus();
+    return cpus.reduce((acc, cpu) => {
+        const { user, nice, sys, idle, irq } = cpu.times;
+        acc.idle += idle;
+        acc.total += user + nice + sys + irq + idle;
+        return acc;
+    }, { idle: 0, total: 0 });
+}
+
+function computeCpuUsage(prevSnapshot, nextSnapshot) {
+    const idleDiff = nextSnapshot.idle - prevSnapshot.idle;
+    const totalDiff = nextSnapshot.total - prevSnapshot.total;
+    if (totalDiff <= 0) {
+        return null;
+    }
+    const busyRatio = (totalDiff - idleDiff) / totalDiff;
+    return clamp(busyRatio, 0, 1);
+}
+
+function mapChannels(channel) {
+    const result = [];
+
+    const pushChannel = (value) => {
+        if (!result.includes(value)) {
+            result.push(value);
+        }
+    };
+
+    const consume = (entry) => {
+        if (Array.isArray(entry)) {
+            entry.forEach(consume);
+            return;
+        }
+        if (typeof entry === 'number') {
+            pushChannel(entry === 2 ? 2 : 1);
+            return;
+        }
+        const value = String(entry || '').trim().toLowerCase();
+        if (!value) {
+            pushChannel(1);
+            pushChannel(2);
+            return;
+        }
+        if (value === 'both' || value === 'ab' || value === 'all' || value === 'a+b') {
+            pushChannel(1);
+            pushChannel(2);
+            return;
+        }
+        if (value === 'b' || value === '2') {
+            pushChannel(2);
+            return;
+        }
+        pushChannel(1);
+    };
+
+    consume(channel);
+
+    return result.length ? result : [1, 2];
+}
+
+function normaliseCpuOptions(data) {
+    const channels = mapChannels(data.channel);
+    const rawInterval = Number.parseInt(data.intervalMs, 10);
+    const intervalMs = clamp(Number.isFinite(rawInterval) ? rawInterval : 1000, 200, 5000);
+
+    let minStrength = Number(data.minStrength);
+    let maxStrength = Number(data.maxStrength);
+
+    if (!Number.isFinite(minStrength)) {
+        minStrength = 0;
+    }
+    if (!Number.isFinite(maxStrength)) {
+        maxStrength = 200;
+    }
+    if (minStrength > maxStrength) {
+        [minStrength, maxStrength] = [maxStrength, minStrength];
+    }
+    minStrength = clamp(Math.round(minStrength), 0, 200);
+    maxStrength = clamp(Math.round(maxStrength), 0, 200);
+
+    let smoothing = Number(data.smoothing);
+    if (!Number.isFinite(smoothing)) {
+        smoothing = 0.3;
+    }
+    smoothing = clamp(smoothing, 0, 0.99);
+
+    return { channels, intervalMs, minStrength, maxStrength, smoothing };
+}
+
+function buildCpuKey(clientId, targetId) {
+    return `${clientId}->${targetId}`;
+}
+
+function startCpuController(key, context) {
+    stopCpuController(key, false);
+
+    const { clientId, targetId, options } = context;
+    const controller = {
+        clientId,
+        targetId,
+        options,
+        snapshot: captureCpuSnapshot(),
+        smoothedUsage: null,
+        intervalId: null
+    };
+
+    controller.intervalId = setInterval(() => {
+        const controlSocket = clients.get(clientId);
+        const targetSocket = clients.get(targetId);
+
+        if (!controlSocket || !targetSocket) {
+            stopCpuController(key, false);
+            return;
+        }
+
+        const nextSnapshot = captureCpuSnapshot();
+        const usage = computeCpuUsage(controller.snapshot, nextSnapshot);
+        controller.snapshot = nextSnapshot;
+
+        if (usage === null) {
+            return;
+        }
+
+        if (controller.smoothedUsage === null) {
+            controller.smoothedUsage = usage;
+        } else {
+            controller.smoothedUsage = controller.smoothedUsage * options.smoothing + usage * (1 - options.smoothing);
+        }
+
+        const finalUsage = controller.smoothedUsage;
+        const strengthSpan = options.maxStrength - options.minStrength;
+        const computedStrength = options.minStrength + finalUsage * strengthSpan;
+        const strength = clamp(Math.round(computedStrength), 0, 200);
+
+        options.channels.forEach((channel) => {
+            const sendData = { type: "msg", clientId, targetId, message: `strength-${channel}+2+${strength}` };
+            targetSocket.send(JSON.stringify(sendData));
+        });
+
+        controlSocket.send(JSON.stringify({
+            type: "cpuAuto",
+            clientId,
+            targetId,
+            message: "tick",
+            usage: Number((finalUsage * 100).toFixed(2)),
+            strength
+        }));
+    }, controller.options.intervalMs);
+
+    cpuControllers.set(key, controller);
+}
+
+function stopCpuController(key, notify) {
+    const controller = cpuControllers.get(key);
+    if (!controller) {
+        return;
+    }
+    clearInterval(controller.intervalId);
+    cpuControllers.delete(key);
+
+    if (notify) {
+        const controlSocket = clients.get(controller.clientId);
+        if (controlSocket) {
+            controlSocket.send(JSON.stringify({ type: "cpuAuto", clientId: controller.clientId, targetId: controller.targetId, message: "stopped" }));
+        }
+    }
+}
+
+function stopCpuControllersByClient(clientId) {
+    [...cpuControllers.entries()].forEach(([key, controller]) => {
+        if (controller.clientId === clientId || controller.targetId === clientId) {
+            stopCpuController(key, false);
+        }
+    });
+}

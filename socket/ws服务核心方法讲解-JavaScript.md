@@ -450,3 +450,9 @@ function invalidRelation(cliendId, targetId, ws) {
 }
 
 ```
+### 新增：CPU 强度同步指令
+
+- 前端可发送 `{ type: "cpuAuto", action: "start", channel, intervalMs, minStrength, maxStrength, smoothing }` 来启动服务器的 CPU→强度映射。`action` 传 `stop` 可终止同步。
+- `channel` 支持 `"both"`(默认)、`"A"`、`"B"`；`intervalMs` 为采样周期毫秒；`minStrength`/`maxStrength` 控制输出区间；`smoothing` 取值 0~0.99 代表指数平滑系数。
+- 服务端会读取宿主机 CPU 利用率并向 APP 推送 `strength-<channel>+2+<value>` 指令，同时向网页回传 `type: "cpuAuto", message: "tick"`，可用来更新 UI 展示当前 CPU% 与映射强度。
+- 若未建立合法绑定会返回 `message: "402"`；掉线或主动停止时返回 `message: "stopped"` 并自动清理定时器。

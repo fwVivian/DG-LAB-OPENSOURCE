@@ -12,6 +12,17 @@ let followBStrength = false;
 
 var wsConn = null; // 全局ws链接
 
+var wsConn = null; // 全局ws链接
+
+let cpuSyncEnabled = false; // CPU同步开关状态
+const cpuSyncOptions = {
+    channel: 'both',
+    intervalMs: 1000,
+    minStrength: 10,
+    maxStrength: 120,
+    smoothing: 0.3
+};
+
 const feedBackMsg = {
     "feedback-0": "A通道：○",
     "feedback-1": "A通道：△",
@@ -79,6 +90,7 @@ function connectWs() {
                 if (message.targetId != targetWSId)
                     return;
                 showToast("对方已断开，code:" + message.message)
+                resetCpuSyncUI();
                 location.reload();
                 break;
             case 'error':
@@ -114,6 +126,9 @@ function connectWs() {
                     showSuccessToast(feedBackMsg[message.message]);
                 }
                 break;
+            case 'cpuAuto':
+                handleCpuAutoMessage(message);
+                break;
             case 'heartbeat':
                 //心跳包
                 console.log("收到心跳");
@@ -141,6 +156,7 @@ function connectWs() {
 
     wsConn.onclose = function (event) {
         showToast("连接已断开");
+        resetCpuSyncUI();
     };
 }
 
@@ -231,6 +247,118 @@ function sendCustomMsg() {
         fangdouSetTimeOut = null;
     }, fangdou);
 
+}
+
+
+function handleCpuAutoMessage(message) {
+    if (message.targetId && targetWSId && message.targetId !== targetWSId) {
+        return;
+    }
+
+    switch (message.message) {
+        case "started":
+            cpuSyncEnabled = true;
+            if (message.options) {
+                if (Array.isArray(message.options.channels)) {
+                    if (message.options.channels.length === 2) {
+                        cpuSyncOptions.channel = "both";
+                    } else if (message.options.channels[0] === 2) {
+                        cpuSyncOptions.channel = "B";
+                    } else {
+                        cpuSyncOptions.channel = "A";
+                    }
+                }
+                if (message.options.intervalMs !== undefined) {
+                    cpuSyncOptions.intervalMs = message.options.intervalMs;
+                }
+                if (message.options.minStrength !== undefined) {
+                    cpuSyncOptions.minStrength = message.options.minStrength;
+                }
+                if (message.options.maxStrength !== undefined) {
+                    cpuSyncOptions.maxStrength = message.options.maxStrength;
+                }
+                if (message.options.smoothing !== undefined) {
+                    cpuSyncOptions.smoothing = message.options.smoothing;
+                }
+            }
+            updateCpuSyncButton();
+            showSuccessToast("CPU同步已开启");
+            break;
+        case "stopped":
+            cpuSyncEnabled = false;
+            updateCpuSyncButton();
+            updateCpuMetrics(0, 0);
+            showToast("CPU同步已停止");
+            break;
+        case "tick":
+            updateCpuMetrics(message.usage, message.strength);
+            break;
+        case "402":
+            showToast("CPU同步失败：未绑定目标");
+            break;
+        default:
+            console.log("收到CPU同步消息：" + JSON.stringify(message));
+            break;
+    }
+}
+
+function updateCpuMetrics(usage, strength) {
+    const usageEl = document.getElementById("cpu-usage");
+    const strengthEl = document.getElementById("cpu-strength");
+
+    const usageValue = typeof usage === "number" && !Number.isNaN(usage) ? usage : 0;
+    const strengthValue = typeof strength === "number" && !Number.isNaN(strength) ? strength : 0;
+
+    if (usageEl) {
+        usageEl.innerText = usageValue.toFixed(2);
+    }
+    if (strengthEl) {
+        strengthEl.innerText = strengthValue;
+    }
+}
+
+function toggleCpuSync() {
+    if (!connectionId || !targetWSId) {
+        showToast("请先完成绑定再开启CPU同步");
+        return;
+    }
+
+    if (cpuSyncEnabled) {
+        sendWsMsg({ type: "cpuAuto", action: "stop" });
+        return;
+    }
+
+    const payload = {
+        type: "cpuAuto",
+        action: "start",
+        channel: cpuSyncOptions.channel,
+        intervalMs: cpuSyncOptions.intervalMs,
+        minStrength: cpuSyncOptions.minStrength,
+        maxStrength: cpuSyncOptions.maxStrength,
+        smoothing: cpuSyncOptions.smoothing
+    };
+
+    sendWsMsg(payload);
+}
+
+function updateCpuSyncButton() {
+    const btn = document.getElementById("cpu-sync-btn");
+    if (!btn) {
+        return;
+    }
+    if (cpuSyncEnabled) {
+        btn.innerText = "停止CPU同步";
+        btn.classList.add("red-background");
+    } else {
+        btn.innerText = "开启CPU同步";
+        btn.classList.remove("red-background");
+    }
+}
+
+function resetCpuSyncUI() {
+    cpuSyncEnabled = false;
+    updateCpuSyncButton();
+    updateCpuMetrics(0, 0);
 }
 
 function showToast(message) {

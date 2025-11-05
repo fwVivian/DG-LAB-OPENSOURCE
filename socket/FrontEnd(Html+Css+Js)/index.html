@@ -78,6 +78,14 @@
                 <button onclick="clearAB(1)"> 清除当前波形队列 </button>
                 <img src="question.svg" class="question-img" id="question3" />
             </div>
+            <div class="btn-container cpu-sync">
+                <span>CPU 利用率:</span>
+                <span id="cpu-usage">0.00</span><span>%</span>
+                <span>→ 强度:</span>
+                <span id="cpu-strength">0</span>
+                <button id="cpu-sync-btn" onclick="toggleCpuSync()">开启CPU同步</button>
+                <span class="cpu-hint">默认 1 秒采样，可在 wsConnection.js 调整同步参数。</span>
+            </div>
             <div class="btn-container">
                 <span>B通道: 当前强度:</span>
                 <span id="channel-b">0</span>
